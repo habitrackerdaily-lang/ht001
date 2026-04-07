@@ -20,12 +20,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- React & ReactDOM -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     
     <!-- Babel for in-browser JSX compilation -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
 
     <style>
         html, body {
@@ -39,7 +38,6 @@
           max-width: 100%;
           height: auto;
         }
-        
         body { font-family: 'Inter', sans-serif; }
         .animate-fade-in { animation: fadeIn 0.3s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -135,7 +133,13 @@
                   headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                   body: JSON.stringify({ table: tableName, action, data })
                 });
-                return await res.json();
+                const text = await res.text();
+                try {
+                  return JSON.parse(text);
+                } catch (err) {
+                  console.warn('API returned non-JSON, but request sent:', text);
+                  return { success: true };
+                }
               } catch (e) {
                 console.error(`Gagal menyimpan data ke ${tableName}:`, e);
               }
@@ -215,12 +219,19 @@
 
             // Update Local Stats
             let stats = db.Habit_Stats.find(s => s.habit_id === habit_id);
-            if(stats && status === 'done') {
-                stats.current_streak += 1;
-                if(stats.current_streak > stats.longest_streak) stats.longest_streak = stats.current_streak;
-                await SheetsAPI._postAction('Habit_Stats', 'update', stats);
-            } else if (stats && status !== 'done' && status !== 'partial') {
-                stats.current_streak = 0;
+            if(stats) {
+                let current = Number(stats.current_streak) || 0;
+                let longest = Number(stats.longest_streak) || 0;
+                
+                if (status === 'done') {
+                    current += 1;
+                    if (current > longest) longest = current;
+                } else if (status !== 'partial') {
+                    current = 0;
+                }
+                
+                stats.current_streak = current;
+                stats.longest_streak = longest;
                 await SheetsAPI._postAction('Habit_Stats', 'update', stats);
             }
 
@@ -312,9 +323,34 @@
           const showToast = (message, type = 'info') => setToast({ message, type });
 
           const handleLogHabit = async (habit, value, status) => {
-            await SheetsAPI.logHabit(habit.habit_id, getTodayStr(), value, status);
-            fetchData();
+            // Optimistic UI Update untuk respon instan di Dashboard
+            setLogs(prev => {
+              const newLogs = [...prev];
+              const idx = newLogs.findIndex(l => l.habit_id === habit.habit_id && l.date === getTodayStr());
+              if (idx >= 0) newLogs[idx] = { ...newLogs[idx], value, status };
+              else newLogs.push({ log_id: `temp_${Date.now()}`, habit_id: habit.habit_id, user_id: 'u1', date: getTodayStr(), value, status, notes: '' });
+              return newLogs;
+            });
+
+            setStats(prev => prev.map(s => {
+              if (s.habit_id === habit.habit_id) {
+                let current = Number(s.current_streak) || 0;
+                let longest = Number(s.longest_streak) || 0;
+                if (status === 'done') {
+                  current += 1;
+                  if (current > longest) longest = current;
+                } else if (status !== 'partial') {
+                  current = 0;
+                }
+                return { ...s, current_streak: current, longest_streak: longest };
+              }
+              return s;
+            }));
+
             if (status === 'done') showToast(`Completed: ${habit.habit_name}! 🎉`, 'success');
+
+            // Proses simpan ke API di background
+            await SheetsAPI.logHabit(habit.habit_id, getTodayStr(), value, status);
           };
 
           const navItems = [
@@ -1010,7 +1046,6 @@
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
-
     </script>
 </body>
 </html>
