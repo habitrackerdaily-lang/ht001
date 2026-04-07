@@ -103,11 +103,22 @@
           const dateStr = d.toISOString().split('T')[0];
           if (Math.random() > 0.2) initialDB.Habit_Log.push({ log_id: `l1_${i}`, habit_id: 'h1', user_id: 'u1', date: dateStr, value: 8, status: 'done', notes: '' });
           if (Math.random() > 0.3) initialDB.Habit_Log.push({ log_id: `l2_${i}`, habit_id: 'h2', user_id: 'u1', date: dateStr, value: 30, status: 'done', notes: '' });
-          if (Math.random() > 0.6) initialDB.Habit_Log.push({ log_id: `l3_${i}`, habit_id: 'h3', user_id: 'u1', date: dateStr, value: 1, status: 'done', notes: '' });
-        }
+        if (Math.random() > 0.6) initialDB.Habit_Log.push({ log_id: `l3_${i}`, habit_id: 'h3', user_id: 'u1', date: dateStr, value: 1, status: 'done', notes: '' });
+      }
 
-        const SheetsAPI = {
-          getDB: () => JSON.parse(localStorage.getItem(MOCK_DB_KEY)) || initialDB,
+      // Memindahkan fungsi format tanggal ke sini agar bisa digunakan saat menarik data dari Google Sheets
+      const formatDateLocal = (d) => {
+          const year = d.getFullYear();
+          const month = String(d.getMonth() + 1).padStart(2, '0');
+          const day = String(d.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+      };
+
+      const getTodayStr = () => formatDateLocal(new Date());
+      const classNames = (...classes) => classes.filter(Boolean).join(' ');
+
+      const SheetsAPI = {
+        getDB: () => JSON.parse(localStorage.getItem(MOCK_DB_KEY)) || initialDB,
           saveDB: (db) => localStorage.setItem(MOCK_DB_KEY, JSON.stringify(db)),
           
           _fetchTable: async (tableName) => {
@@ -148,27 +159,48 @@
           },
           
           getHabits: async () => {
-            const remote = await SheetsAPI._fetchTable('Habits');
-            if (remote) return remote.filter(h => h.active === true || h.active === "TRUE" || h.active === "true");
-            return SheetsAPI.getDB().Habits.filter(h => h.active);
-          },
-          
-          getLogs: async () => {
-            const remote = await SheetsAPI._fetchTable('Habit_Log');
-            if (remote) {
-              // Menyeragamkan format tanggal yang ditarik dari Google Sheets agar pas dengan YYYY-MM-DD
-              return remote.map(log => {
-                let normalizedDate = log.date;
-                if (log.date && typeof log.date === 'string' && log.date.includes('T')) {
-                  normalizedDate = log.date.split('T')[0];
+          const remote = await SheetsAPI._fetchTable('Habits');
+          if (remote) return remote.filter(h => h.active === true || h.active === "TRUE" || h.active === "true");
+          return SheetsAPI.getDB().Habits.filter(h => h.active);
+        },
+        
+        getLogs: async () => {
+          const remote = await SheetsAPI._fetchTable('Habit_Log');
+          if (remote) {
+            return remote.map(log => {
+              let rawDate = String(log.date || '').trim();
+              let normalizedDate = rawDate;
+              
+              // Menangani pergeseran Timezone dari API Google (misal 2026-04-05T17:00:00.000Z menjadi 2026-04-06)
+              if (rawDate.includes('T')) {
+                const d = new Date(rawDate);
+                if (!isNaN(d.getTime())) {
+                  normalizedDate = formatDateLocal(d);
+                } else {
+                  normalizedDate = rawDate.split('T')[0];
                 }
-                return { ...log, date: normalizedDate };
-              });
-            }
-            return SheetsAPI.getDB().Habit_Log;
-          },
-          
-          getStats: async () => {
+              } else if (rawDate.includes(' ')) {
+                normalizedDate = rawDate.split(' ')[0];
+              } else if (rawDate.includes('/')) {
+                const d = new Date(rawDate);
+                if (!isNaN(d.getTime())) {
+                  normalizedDate = formatDateLocal(d);
+                }
+              }
+              
+              // Potong string pastikan hanya mengambil format YYYY-MM-DD
+              if (normalizedDate.length > 10) normalizedDate = normalizedDate.substring(0, 10);
+              
+              // Normalisasi status untuk mengantisipasi ketikan manual dengan Huruf Kapital atau Spasi di excel
+              const cleanStatus = String(log.status || '').toLowerCase().trim();
+
+              return { ...log, date: normalizedDate, status: cleanStatus };
+            });
+          }
+          return SheetsAPI.getDB().Habit_Log;
+        },
+        
+        getStats: async () => {
             const remote = await SheetsAPI._fetchTable('Habit_Stats');
             if (remote) return remote;
             return SheetsAPI.getDB().Habit_Stats;
@@ -240,29 +272,18 @@
                 }
                 
                 stats.current_streak = current;
-                stats.longest_streak = longest;
-                await SheetsAPI._postAction('Habit_Stats', 'update', stats);
-            }
-
-            SheetsAPI.saveDB(db);
-            return true;
+              stats.longest_streak = longest;
+              await SheetsAPI._postAction('Habit_Stats', 'update', stats);
           }
-        };
 
-        // Fungsi baru untuk mendapatkan format tanggal lokal (mengatasi isu Timezone UTC ke Indonesia/GMT+7)
-        const formatDateLocal = (d) => {
-            const year = d.getFullYear();
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const day = String(d.getDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-        };
+          SheetsAPI.saveDB(db);
+          return true;
+        }
+      };
 
-        const getTodayStr = () => formatDateLocal(new Date());
-        const classNames = (...classes) => classes.filter(Boolean).join(' ');
+      // --- COMPONENTS ---
 
-        // --- COMPONENTS ---
-
-        const Toast = ({ message, type = 'info', onClose }) => {
+      const Toast = ({ message, type = 'info', onClose }) => {
           useEffect(() => {
             const timer = setTimeout(onClose, 3000);
             return () => clearTimeout(timer);
