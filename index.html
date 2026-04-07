@@ -1,984 +1,1002 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Check, Plus, Activity, Calendar, BarChart2, Settings as SettingsIcon, 
-  Bell, Trash2, Edit2, Moon, Sun, Menu, X, ChevronRight, CheckCircle2, 
-  Clock, Flame, Target, Trophy, Info
-} from 'lucide-react';
-
-// --- MOCK GOOGLE SHEETS DATABASE ---
-// In production, these methods would be fetch() calls to a Google Apps Script Web App URL.
-const MOCK_DB_KEY = 'sheets_habit_db';
-const API_URL_KEY = 'sheets_api_url';
-
-const getApiUrl = () => localStorage.getItem(API_URL_KEY) || '';
-
-const initialDB = {
-  Users: [{ user_id: 'u1', name: 'Demo User', email: 'demo@example.com', created_at: new Date().toISOString() }],
-  Habits: [
-    { habit_id: 'h1', user_id: 'u1', habit_name: 'Drink Water', category: 'Health', habit_type: 'count', target_value: 8, schedule_type: 'daily', created_at: '2023-10-01', active: true },
-    { habit_id: 'h2', user_id: 'u1', habit_name: 'Read Book', category: 'Learning', habit_type: 'duration', target_value: 30, schedule_type: 'daily', created_at: '2023-10-01', active: true },
-    { habit_id: 'h3', user_id: 'u1', habit_name: 'Morning Workout', category: 'Fitness', habit_type: 'boolean', target_value: 1, schedule_type: 'daily', created_at: '2023-10-01', active: true }
-  ],
-  Habit_Log: [],
-  Habit_Stats: [
-    { habit_id: 'h1', current_streak: 3, longest_streak: 12, completion_rate: 85 },
-    { habit_id: 'h2', current_streak: 5, longest_streak: 20, completion_rate: 92 },
-    { habit_id: 'h3', current_streak: 0, longest_streak: 5, completion_rate: 45 }
-  ]
-};
-
-// Seed some past logs for demonstration
-const todayDate = new Date();
-for(let i=14; i>=0; i--) {
-  const d = new Date(todayDate); d.setDate(d.getDate() - i);
-  const dateStr = d.toISOString().split('T')[0];
-  if (Math.random() > 0.2) initialDB.Habit_Log.push({ log_id: `l1_${i}`, habit_id: 'h1', user_id: 'u1', date: dateStr, value: 8, status: 'done', notes: '' });
-  if (Math.random() > 0.3) initialDB.Habit_Log.push({ log_id: `l2_${i}`, habit_id: 'h2', user_id: 'u1', date: dateStr, value: 30, status: 'done', notes: '' });
-  if (Math.random() > 0.6) initialDB.Habit_Log.push({ log_id: `l3_${i}`, habit_id: 'h3', user_id: 'u1', date: dateStr, value: 1, status: 'done', notes: '' });
-}
-
-const SheetsAPI = {
-  getDB: () => JSON.parse(localStorage.getItem(MOCK_DB_KEY)) || initialDB,
-  saveDB: (db) => localStorage.setItem(MOCK_DB_KEY, JSON.stringify(db)),
-  
-  // Method Fetch ke Google Sheets API
-  _fetchTable: async (tableName) => {
-    const url = getApiUrl();
-    if (url) {
-      try {
-        const res = await fetch(`${url}?table=${tableName}`);
-        if (!res.ok) throw new Error('Network error');
-        return await res.json();
-      } catch (e) {
-        console.error(`Gagal mengambil data ${tableName} dari GSheets:`, e);
-      }
-    }
-    return null; // Fallback ke Local Storage jika gagal atau URL kosong
-  },
-
-  // Method Post/Write ke Google Sheets API
-  _postAction: async (tableName, action, data) => {
-    const url = getApiUrl();
-    if (url) {
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ table: tableName, action, data })
-        });
-        return await res.json();
-      } catch (e) {
-        console.error(`Gagal menyimpan data ke ${tableName}:`, e);
-      }
-    }
-    return null;
-  },
-  
-  getHabits: async () => {
-    const remote = await SheetsAPI._fetchTable('Habits');
-    if (remote) return remote.filter(h => h.active === true || h.active === "TRUE" || h.active === "true");
-    return SheetsAPI.getDB().Habits.filter(h => h.active);
-  },
-  
-  getLogs: async () => {
-    const remote = await SheetsAPI._fetchTable('Habit_Log');
-    if (remote) return remote;
-    return SheetsAPI.getDB().Habit_Log;
-  },
-  
-  getStats: async () => {
-    const remote = await SheetsAPI._fetchTable('Habit_Stats');
-    if (remote) return remote;
-    return SheetsAPI.getDB().Habit_Stats;
-  },
-  
-  createHabit: async (habit) => {
-    const newHabit = { ...habit, habit_id: `h_${Date.now()}`, user_id: 'u1', created_at: new Date().toISOString(), active: true };
-    const newStat = { habit_id: newHabit.habit_id, current_streak: 0, longest_streak: 0, completion_rate: 0 };
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyncHabit - Tracker Dashboard</title>
     
-    const db = SheetsAPI.getDB();
-    db.Habits.push(newHabit);
-    db.Habit_Stats.push(newStat);
-    SheetsAPI.saveDB(db);
-
-    await SheetsAPI._postAction('Habits', 'insert', newHabit);
-    await SheetsAPI._postAction('Habit_Stats', 'insert', newStat);
-    return newHabit;
-  },
-  
-  updateHabit: async (habit_id, updates) => {
-    const db = SheetsAPI.getDB();
-    const existing = db.Habits.find(h => h.habit_id === habit_id) || {};
-    const merged = { ...existing, ...updates };
-    
-    db.Habits = db.Habits.map(h => h.habit_id === habit_id ? merged : h);
-    SheetsAPI.saveDB(db);
-
-    await SheetsAPI._postAction('Habits', 'update', { habit_id, ...updates });
-  },
-  
-  deleteHabit: async (habit_id) => {
-    const db = SheetsAPI.getDB();
-    db.Habits = db.Habits.map(h => h.habit_id === habit_id ? { ...h, active: false } : h);
-    SheetsAPI.saveDB(db);
-
-    await SheetsAPI._postAction('Habits', 'update', { habit_id, active: false });
-  },
-  
-  logHabit: async (habit_id, date, value, status) => {
-    const db = SheetsAPI.getDB();
-    const existingIdx = db.Habit_Log.findIndex(l => l.habit_id === habit_id && l.date === date);
-    
-    const logData = { habit_id, user_id: 'u1', date, value, status, notes: '' };
-    let log_id;
-
-    if (existingIdx >= 0) {
-      log_id = db.Habit_Log[existingIdx].log_id;
-      logData.log_id = log_id;
-      db.Habit_Log[existingIdx] = { ...db.Habit_Log[existingIdx], ...logData };
-      await SheetsAPI._postAction('Habit_Log', 'update', logData);
-    } else {
-      log_id = `log_${Date.now()}`;
-      logData.log_id = log_id;
-      db.Habit_Log.push(logData);
-      await SheetsAPI._postAction('Habit_Log', 'insert', logData);
-    }
-
-    // Update Local Stats
-    let stats = db.Habit_Stats.find(s => s.habit_id === habit_id);
-    if(stats && status === 'done') {
-        stats.current_streak += 1;
-        if(stats.current_streak > stats.longest_streak) stats.longest_streak = stats.current_streak;
-        await SheetsAPI._postAction('Habit_Stats', 'update', stats);
-    } else if (stats && status !== 'done' && status !== 'partial') {
-        stats.current_streak = 0;
-        await SheetsAPI._postAction('Habit_Stats', 'update', stats);
-    }
-
-    SheetsAPI.saveDB(db);
-    return true;
-  }
-};
-
-// --- UTILS ---
-const getTodayStr = () => new Date().toISOString().split('T')[0];
-const classNames = (...classes) => classes.filter(Boolean).join(' ');
-
-// --- COMPONENTS ---
-
-// 1. Toast Notification System
-const Toast = ({ message, type = 'info', onClose }) => {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  return (
-    <div className={`fixed bottom-4 right-4 z-50 flex items-center p-4 mb-4 text-sm rounded-lg shadow-lg transform transition-all duration-300 translate-y-0 opacity-100 ${
-      type === 'success' ? 'text-green-800 bg-green-100 dark:bg-green-900/30 dark:text-green-400' :
-      type === 'warning' ? 'text-amber-800 bg-amber-100 dark:bg-amber-900/30 dark:text-amber-400' :
-      'text-blue-800 bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400'
-    }`}>
-      <Bell className="w-4 h-4 mr-2" />
-      <span className="font-medium">{message}</span>
-    </div>
-  );
-};
-
-// 2. Main App Component
-export default function App() {
-  const [darkMode, setDarkMode] = useState(false);
-  const [currentView, setCurrentView] = useState('dashboard');
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [userGender, setUserGender] = useState('man'); 
-  
-  // Data State
-  const [habits, setHabits] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [stats, setStats] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [toast, setToast] = useState(null);
-
-  // Load Data
-  const fetchData = async () => {
-    setLoading(true);
-    const h = await SheetsAPI.getHabits();
-    const l = await SheetsAPI.getLogs();
-    const s = await SheetsAPI.getStats();
-    setHabits(h || []);
-    setLogs(l || []);
-    setStats(s || []);
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    // Check system preference
-    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      setDarkMode(true);
-    }
-    fetchData();
-  }, []);
-
-  useEffect(() => {
-    if (darkMode) document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  }, [darkMode]);
-
-  // Notifications Logic
-  useEffect(() => {
-    if (loading) return;
-    const today = getTodayStr();
-    const pendingHabits = habits.filter(h => {
-      const todayLog = logs.find(l => l.habit_id === h.habit_id && l.date === today);
-      return !todayLog || todayLog.status !== 'done';
-    });
-    
-    if (pendingHabits.length > 0) {
-      // Simulate smart reminder for later in the day
-      const hour = new Date().getHours();
-      if (hour >= 18) {
-        showToast(`Don't forget! You have ${pendingHabits.length} habits left to complete today.`, 'warning');
-        
-        // Native Browser Notification Trigger
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification('SyncHabit Reminder', {
-            body: `You have ${pendingHabits.length} habits left to complete today!`,
-            icon: 'https://cdn-icons-png.flaticon.com/512/1000/1000243.png'
-          });
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                }
+            }
         }
-      }
-    }
-  }, [habits, logs, loading]);
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-  const showToast = (message, type = 'info') => setToast({ message, type });
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-  const handleLogHabit = async (habit, value, status) => {
-    await SheetsAPI.logHabit(habit.habit_id, getTodayStr(), value, status);
-    fetchData();
-    if (status === 'done') showToast(`Completed: ${habit.habit_name}! 🎉`, 'success');
-  };
-
-  const navItems = [
-    { id: 'dashboard', icon: Activity, label: 'Dashboard' },
-    { id: 'habits', icon: Target, label: 'Habits' },
-    { id: 'analytics', icon: BarChart2, label: 'Analytics' },
-    { id: 'history', icon: Calendar, label: 'History' },
-    { id: 'settings', icon: SettingsIcon, label: 'Settings' },
-  ];
-
-  return (
-    <div className={`min-h-screen font-sans bg-slate-50 text-slate-900 transition-colors duration-200 dark:bg-slate-950 dark:text-slate-100 flex flex-col md:flex-row`}>
-      
-      {/* Sidebar (Desktop) / Bottom Nav (Mobile) */}
-      <nav className="fixed bottom-0 w-full z-40 bg-white border-t border-slate-200 md:relative md:w-64 md:border-t-0 md:border-r md:h-screen md:bg-white/80 md:backdrop-blur-xl dark:bg-slate-900 dark:border-slate-800 transition-colors flex-shrink-0">
-        <div className="hidden md:flex items-center gap-2 p-6 mb-4">
-          <div className="bg-blue-600 p-2 rounded-xl">
-            <CheckCircle2 className="w-6 h-6 text-white" />
-          </div>
-          <span className="font-bold text-xl tracking-tight">SyncHabit</span>
-        </div>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .animate-fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         
-        <div className="flex md:flex-col justify-around md:justify-start px-2 py-3 md:p-4 gap-1 md:gap-2">
-          {navItems.map(item => {
-            const Icon = item.icon;
-            const isActive = currentView === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setCurrentView(item.id)}
-                className={classNames(
-                  "flex flex-col md:flex-row items-center md:justify-start flex-1 md:flex-none p-2 md:px-4 md:py-3 rounded-xl transition-all duration-200 group",
-                  isActive 
-                    ? "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 font-medium shadow-sm" 
-                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-                )}
-              >
-                <Icon className={classNames("w-5 h-5 md:mr-3 mb-1 md:mb-0 transition-transform group-hover:scale-110", isActive && "scale-110")} />
-                <span className="text-[10px] md:text-sm">{item.label}</span>
-              </button>
-            )
-          })}
-        </div>
-      </nav>
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .dark ::-webkit-scrollbar-thumb { background: #334155; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
+    <div id="root"></div>
 
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden">
-        {/* Header */}
-        <header className="flex items-center justify-between p-4 md:px-8 md:py-6 bg-white/80 backdrop-blur-md border-b border-slate-200 dark:bg-slate-950/80 dark:border-slate-800 sticky top-0 z-30">
-          <div>
-            <h1 className="text-xl md:text-2xl font-bold capitalize">{currentView}</h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => showToast('Notifications are up to date.', 'info')}
-              className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 transition-colors relative"
-            >
-              <Bell className="w-5 h-5" />
-              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
-            </button>
-            <button 
-              onClick={() => setDarkMode(!darkMode)}
-              className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 transition-colors"
-            >
-              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-            </button>
-            <img 
-              src={userGender === 'woman' ? "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=150&q=80" : "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80"} 
-              alt="User Avatar" 
-              className="w-8 h-8 rounded-full border-2 border-white dark:border-slate-800 shadow-sm ml-2 object-cover" 
-            />
-          </div>
-        </header>
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
 
-        {/* Scrollable Area */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-24 md:pb-8">
-          <div className="max-w-6xl mx-auto">
-            {loading ? (
-              <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-              </div>
-            ) : (
-              <>
-                {currentView === 'dashboard' && <DashboardView habits={habits} logs={logs} stats={stats} onLog={handleLogHabit} userGender={userGender} />}
-                {currentView === 'habits' && <HabitsManager habits={habits} onRefresh={fetchData} showToast={showToast} />}
-                {currentView === 'analytics' && <AnalyticsView habits={habits} logs={logs} stats={stats} />}
-                {currentView === 'history' && <HistoryView logs={logs} habits={habits} />}
-                {currentView === 'settings' && <SettingsView showToast={showToast} userGender={userGender} setUserGender={setUserGender} onRefresh={fetchData} />}
-              </>
-            )}
-          </div>
-        </div>
-      </main>
+        // --- ICONS (Replacing lucide-react for standalone HTML) ---
+        const Activity = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>;
+        const Calendar = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>;
+        const BarChart2 = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>;
+        const SettingsIcon = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>;
+        const Bell = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>;
+        const Trash2 = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>;
+        const Edit2 = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>;
+        const Moon = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>;
+        const Sun = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>;
+        const CheckCircle2 = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9 12l2 2 4-4"></path></svg>;
+        const Flame = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"></path></svg>;
+        const Target = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>;
+        const Trophy = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"></path><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"></path><path d="M4 22h16"></path><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"></path></svg>;
+        const Info = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>;
+        const Plus = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>;
+        const Check = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>;
+        const X = ({className}) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>;
 
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
-    </div>
-  );
-}
+        // --- MOCK GOOGLE SHEETS DATABASE ---
+        const MOCK_DB_KEY = 'sheets_habit_db';
+        const API_URL_KEY = 'sheets_api_url';
 
-// --- SUB-VIEWS ---
+        const getApiUrl = () => localStorage.getItem(API_URL_KEY) || '';
 
-function DashboardView({ habits, logs, stats, onLog, userGender }) {
-  const today = getTodayStr();
-  
-  const todayStats = useMemo(() => {
-    let completed = 0;
-    const activeHabits = habits.length;
-    habits.forEach(h => {
-      const log = logs.find(l => l.habit_id === h.habit_id && l.date === today);
-      if (log && log.status === 'done') completed++;
-    });
-    return { completed, total: activeHabits, percent: activeHabits ? Math.round((completed/activeHabits)*100) : 0 };
-  }, [habits, logs, today]);
+        const initialDB = {
+          Users: [{ user_id: 'u1', name: 'Demo User', email: 'demo@example.com', created_at: new Date().toISOString() }],
+          Habits: [
+            { habit_id: 'h1', user_id: 'u1', habit_name: 'Drink Water', category: 'Health', habit_type: 'count', target_value: 8, schedule_type: 'daily', created_at: '2023-10-01', active: true },
+            { habit_id: 'h2', user_id: 'u1', habit_name: 'Read Book', category: 'Learning', habit_type: 'duration', target_value: 30, schedule_type: 'daily', created_at: '2023-10-01', active: true },
+            { habit_id: 'h3', user_id: 'u1', habit_name: 'Morning Workout', category: 'Fitness', habit_type: 'boolean', target_value: 1, schedule_type: 'daily', created_at: '2023-10-01', active: true }
+          ],
+          Habit_Log: [],
+          Habit_Stats: [
+            { habit_id: 'h1', current_streak: 3, longest_streak: 12, completion_rate: 85 },
+            { habit_id: 'h2', current_streak: 5, longest_streak: 20, completion_rate: 92 },
+            { habit_id: 'h3', current_streak: 0, longest_streak: 5, completion_rate: 45 }
+          ]
+        };
 
-  const bestStreak = useMemo(() => {
-    return Math.max(0, ...stats.map(s => Number(s.current_streak) || 0));
-  }, [stats]);
+        // Seed some past logs for demonstration
+        const todayDate = new Date();
+        for(let i=14; i>=0; i--) {
+          const d = new Date(todayDate); d.setDate(d.getDate() - i);
+          const dateStr = d.toISOString().split('T')[0];
+          if (Math.random() > 0.2) initialDB.Habit_Log.push({ log_id: `l1_${i}`, habit_id: 'h1', user_id: 'u1', date: dateStr, value: 8, status: 'done', notes: '' });
+          if (Math.random() > 0.3) initialDB.Habit_Log.push({ log_id: `l2_${i}`, habit_id: 'h2', user_id: 'u1', date: dateStr, value: 30, status: 'done', notes: '' });
+          if (Math.random() > 0.6) initialDB.Habit_Log.push({ log_id: `l3_${i}`, habit_id: 'h3', user_id: 'u1', date: dateStr, value: 1, status: 'done', notes: '' });
+        }
 
-  const last7Days = useMemo(() => {
-    const days = [];
-    const todayObj = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(todayObj);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-      
-      let completed = 0;
-      habits.forEach(h => {
-        const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
-        if (log && log.status === 'done') completed++;
-      });
-      days.push({ name: dayName, date: dateStr, value: habits.length ? Math.round((completed/habits.length)*100) : 0 });
-    }
-    return days;
-  }, [habits, logs]);
+        const SheetsAPI = {
+          getDB: () => JSON.parse(localStorage.getItem(MOCK_DB_KEY)) || initialDB,
+          saveDB: (db) => localStorage.setItem(MOCK_DB_KEY, JSON.stringify(db)),
+          
+          _fetchTable: async (tableName) => {
+            const url = getApiUrl();
+            if (url) {
+              try {
+                const res = await fetch(`${url}?table=${tableName}`);
+                if (!res.ok) throw new Error('Network error');
+                return await res.json();
+              } catch (e) {
+                console.error(`Gagal mengambil data ${tableName} dari GSheets:`, e);
+              }
+            }
+            return null; 
+          },
 
-  const bannerImg = 'https://plain-apac-prod-public.komododecks.com/202604/07/OHrBCEYHW4QxH8pSLy3e/image.png';
+          _postAction: async (tableName, action, data) => {
+            const url = getApiUrl();
+            if (url) {
+              try {
+                const res = await fetch(url, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                  body: JSON.stringify({ table: tableName, action, data })
+                });
+                return await res.json();
+              } catch (e) {
+                console.error(`Gagal menyimpan data ke ${tableName}:`, e);
+              }
+            }
+            return null;
+          },
+          
+          getHabits: async () => {
+            const remote = await SheetsAPI._fetchTable('Habits');
+            if (remote) return remote.filter(h => h.active === true || h.active === "TRUE" || h.active === "true");
+            return SheetsAPI.getDB().Habits.filter(h => h.active);
+          },
+          
+          getLogs: async () => {
+            const remote = await SheetsAPI._fetchTable('Habit_Log');
+            if (remote) return remote;
+            return SheetsAPI.getDB().Habit_Log;
+          },
+          
+          getStats: async () => {
+            const remote = await SheetsAPI._fetchTable('Habit_Stats');
+            if (remote) return remote;
+            return SheetsAPI.getDB().Habit_Stats;
+          },
+          
+          createHabit: async (habit) => {
+            const newHabit = { ...habit, habit_id: `h_${Date.now()}`, user_id: 'u1', created_at: new Date().toISOString(), active: true };
+            const newStat = { habit_id: newHabit.habit_id, current_streak: 0, longest_streak: 0, completion_rate: 0 };
+            
+            const db = SheetsAPI.getDB();
+            db.Habits.push(newHabit);
+            db.Habit_Stats.push(newStat);
+            SheetsAPI.saveDB(db);
 
-  return (
-    <div className="space-y-6 animate-fade-in">
-      {/* Top Banner Image */}
-      <div className="w-full h-32 md:h-56 rounded-2xl overflow-hidden relative shadow-sm bg-blue-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center">
-        <img 
-          src={bannerImg} 
-          alt="Dashboard Banner" 
-          className="w-full h-full object-cover md:object-cover object-center opacity-90 hover:opacity-100 transition-opacity"
-        />
-        <div className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/30 to-transparent flex items-end p-4 md:p-6">
-          <h2 className="text-white text-xl md:text-2xl font-bold drop-shadow-md">Stay Consistent Today! ✨</h2>
-        </div>
-      </div>
+            await SheetsAPI._postAction('Habits', 'insert', newHabit);
+            await SheetsAPI._postAction('Habit_Stats', 'insert', newStat);
+            return newHabit;
+          },
+          
+          updateHabit: async (habit_id, updates) => {
+            const db = SheetsAPI.getDB();
+            const existing = db.Habits.find(h => h.habit_id === habit_id) || {};
+            const merged = { ...existing, ...updates };
+            
+            db.Habits = db.Habits.map(h => h.habit_id === habit_id ? merged : h);
+            SheetsAPI.saveDB(db);
 
-      {/* Top Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-lg shadow-blue-500/20">
-          <h3 className="text-blue-100 text-sm font-medium mb-1">Today's Progress</h3>
-          <div className="flex items-end gap-2 mb-4">
-            <span className="text-4xl font-bold">{todayStats.completed}</span>
-            <span className="text-blue-200 mb-1">/ {todayStats.total} completed</span>
-          </div>
-          <div className="w-full bg-blue-900/40 rounded-full h-2.5 backdrop-blur-sm overflow-hidden">
-            <div className="bg-white h-2.5 rounded-full transition-all duration-1000 ease-out" style={{ width: `${todayStats.percent}%` }}></div>
-          </div>
-        </div>
-        
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col justify-between">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <h3 className="text-sm font-medium">Current Best Streak</h3>
-            <Flame className="w-5 h-5 text-orange-500" />
-          </div>
-          <div className="text-3xl font-bold text-slate-800 dark:text-slate-100 mt-2">
-            {bestStreak} <span className="text-lg font-normal text-slate-400">days</span>
-          </div>
-        </div>
+            await SheetsAPI._postAction('Habits', 'update', { habit_id, ...updates });
+          },
+          
+          deleteHabit: async (habit_id) => {
+            const db = SheetsAPI.getDB();
+            db.Habits = db.Habits.map(h => h.habit_id === habit_id ? { ...h, active: false } : h);
+            SheetsAPI.saveDB(db);
 
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col justify-between">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <h3 className="text-sm font-medium">Total Active Habits</h3>
-            <Target className="w-5 h-5 text-emerald-500" />
-          </div>
-          <div className="text-3xl font-bold text-slate-800 dark:text-slate-100 mt-2">
-            {habits.length}
-          </div>
-        </div>
-      </div>
+            await SheetsAPI._postAction('Habits', 'update', { habit_id, active: false });
+          },
+          
+          logHabit: async (habit_id, date, value, status) => {
+            const db = SheetsAPI.getDB();
+            const existingIdx = db.Habit_Log.findIndex(l => l.habit_id === habit_id && l.date === date);
+            
+            const logData = { habit_id, user_id: 'u1', date, value, status, notes: '' };
+            let log_id;
 
-      {/* Mini Trend Chart for Dashboard */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl shadow-sm">
-        <h3 className="text-sm font-bold mb-4 flex items-center gap-2 text-slate-700 dark:text-slate-300">
-          <Activity className="w-4 h-4 text-blue-500"/> 7-Day Trend
-        </h3>
-        <div className="h-24 flex items-end justify-between gap-2">
-          {last7Days.map((day, i) => (
-            <div key={i} className="flex flex-col items-center flex-1 group">
-              <div className="w-full relative flex justify-center h-full items-end rounded-t-md">
-                <div 
-                  className="w-full max-w-[30px] bg-blue-100 dark:bg-slate-800 rounded-t-sm transition-all relative overflow-hidden" 
-                  style={{ height: '100%' }}
-                >
-                  <div 
-                    className="absolute bottom-0 w-full bg-blue-500 dark:bg-blue-600 rounded-t-sm transition-all duration-700 ease-out" 
-                    style={{ height: `${day.value}%` }}
-                  ></div>
+            if (existingIdx >= 0) {
+              log_id = db.Habit_Log[existingIdx].log_id;
+              logData.log_id = log_id;
+              db.Habit_Log[existingIdx] = { ...db.Habit_Log[existingIdx], ...logData };
+              await SheetsAPI._postAction('Habit_Log', 'update', logData);
+            } else {
+              log_id = `log_${Date.now()}`;
+              logData.log_id = log_id;
+              db.Habit_Log.push(logData);
+              await SheetsAPI._postAction('Habit_Log', 'insert', logData);
+            }
+
+            // Update Local Stats
+            let stats = db.Habit_Stats.find(s => s.habit_id === habit_id);
+            if(stats && status === 'done') {
+                stats.current_streak += 1;
+                if(stats.current_streak > stats.longest_streak) stats.longest_streak = stats.current_streak;
+                await SheetsAPI._postAction('Habit_Stats', 'update', stats);
+            } else if (stats && status !== 'done' && status !== 'partial') {
+                stats.current_streak = 0;
+                await SheetsAPI._postAction('Habit_Stats', 'update', stats);
+            }
+
+            SheetsAPI.saveDB(db);
+            return true;
+          }
+        };
+
+        const getTodayStr = () => new Date().toISOString().split('T')[0];
+        const classNames = (...classes) => classes.filter(Boolean).join(' ');
+
+        // --- COMPONENTS ---
+
+        const Toast = ({ message, type = 'info', onClose }) => {
+          useEffect(() => {
+            const timer = setTimeout(onClose, 3000);
+            return () => clearTimeout(timer);
+          }, [onClose]);
+
+          return (
+            <div className={`fixed bottom-4 right-4 z-50 flex items-center p-4 mb-4 text-sm rounded-lg shadow-lg transform transition-all duration-300 translate-y-0 opacity-100 ${
+              type === 'success' ? 'text-green-800 bg-green-100 dark:bg-green-900/30 dark:text-green-400' :
+              type === 'warning' ? 'text-amber-800 bg-amber-100 dark:bg-amber-900/30 dark:text-amber-400' :
+              'text-blue-800 bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400'
+            }`}>
+              <Bell className="w-4 h-4 mr-2" />
+              <span className="font-medium">{message}</span>
+            </div>
+          );
+        };
+
+        function App() {
+          const [darkMode, setDarkMode] = useState(false);
+          const [currentView, setCurrentView] = useState('dashboard');
+          const [userGender, setUserGender] = useState('man'); 
+          
+          const [habits, setHabits] = useState([]);
+          const [logs, setLogs] = useState([]);
+          const [stats, setStats] = useState([]);
+          const [loading, setLoading] = useState(true);
+          const [toast, setToast] = useState(null);
+
+          const fetchData = async () => {
+            setLoading(true);
+            const h = await SheetsAPI.getHabits();
+            const l = await SheetsAPI.getLogs();
+            const s = await SheetsAPI.getStats();
+            setHabits(h || []);
+            setLogs(l || []);
+            setStats(s || []);
+            setLoading(false);
+          };
+
+          useEffect(() => {
+            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+              setDarkMode(true);
+            }
+            fetchData();
+          }, []);
+
+          useEffect(() => {
+            if (darkMode) document.documentElement.classList.add('dark');
+            else document.documentElement.classList.remove('dark');
+          }, [darkMode]);
+
+          useEffect(() => {
+            if (loading) return;
+            const today = getTodayStr();
+            const pendingHabits = habits.filter(h => {
+              const todayLog = logs.find(l => l.habit_id === h.habit_id && l.date === today);
+              return !todayLog || todayLog.status !== 'done';
+            });
+            
+            if (pendingHabits.length > 0) {
+              const hour = new Date().getHours();
+              if (hour >= 18) {
+                showToast(`Don't forget! You have ${pendingHabits.length} habits left to complete today.`, 'warning');
+                
+                if ('Notification' in window && Notification.permission === 'granted') {
+                  new Notification('SyncHabit Reminder', {
+                    body: `You have ${pendingHabits.length} habits left to complete today!`,
+                    icon: 'https://cdn-icons-png.flaticon.com/512/1000/1000243.png'
+                  });
+                }
+              }
+            }
+          }, [habits, logs, loading]);
+
+          const showToast = (message, type = 'info') => setToast({ message, type });
+
+          const handleLogHabit = async (habit, value, status) => {
+            await SheetsAPI.logHabit(habit.habit_id, getTodayStr(), value, status);
+            fetchData();
+            if (status === 'done') showToast(`Completed: ${habit.habit_name}! 🎉`, 'success');
+          };
+
+          const navItems = [
+            { id: 'dashboard', icon: Activity, label: 'Dashboard' },
+            { id: 'habits', icon: Target, label: 'Habits' },
+            { id: 'analytics', icon: BarChart2, label: 'Analytics' },
+            { id: 'history', icon: Calendar, label: 'History' },
+            { id: 'settings', icon: SettingsIcon, label: 'Settings' },
+          ];
+
+          return (
+            <div className={`min-h-screen font-sans flex flex-col md:flex-row`}>
+              
+              <nav className="fixed bottom-0 w-full z-40 bg-white border-t border-slate-200 md:relative md:w-64 md:border-t-0 md:border-r md:h-screen md:bg-white/80 md:backdrop-blur-xl dark:bg-slate-900 dark:border-slate-800 transition-colors flex-shrink-0">
+                <div className="hidden md:flex items-center gap-2 p-6 mb-4">
+                  <div className="bg-blue-600 p-2 rounded-xl">
+                    <CheckCircle2 className="w-6 h-6 text-white" />
+                  </div>
+                  <span className="font-bold text-xl tracking-tight">SyncHabit</span>
+                </div>
+                
+                <div className="flex md:flex-col justify-around md:justify-start px-2 py-3 md:p-4 gap-1 md:gap-2">
+                  {navItems.map(item => {
+                    const IconComp = item.icon;
+                    const isActive = currentView === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => setCurrentView(item.id)}
+                        className={classNames(
+                          "flex flex-col md:flex-row items-center md:justify-start flex-1 md:flex-none p-2 md:px-4 md:py-3 rounded-xl transition-all duration-200 group",
+                          isActive 
+                            ? "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 font-medium shadow-sm" 
+                            : "text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+                        )}
+                      >
+                        <IconComp className={classNames("w-5 h-5 md:mr-3 mb-1 md:mb-0 transition-transform group-hover:scale-110", isActive && "scale-110")} />
+                        <span className="text-[10px] md:text-sm">{item.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </nav>
+
+              <main className="flex-1 flex flex-col h-screen overflow-hidden">
+                <header className="flex items-center justify-between p-4 md:px-8 md:py-6 bg-white/80 backdrop-blur-md border-b border-slate-200 dark:bg-slate-950/80 dark:border-slate-800 sticky top-0 z-30">
+                  <div>
+                    <h1 className="text-xl md:text-2xl font-bold capitalize">{currentView}</h1>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                      {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => showToast('Notifications are up to date.', 'info')}
+                      className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 transition-colors relative"
+                    >
+                      <Bell className="w-5 h-5" />
+                      <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+                    </button>
+                    <button 
+                      onClick={() => setDarkMode(!darkMode)}
+                      className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 transition-colors"
+                    >
+                      {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                    </button>
+                    <img 
+                      src={userGender === 'woman' ? "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=150&q=80" : "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80"} 
+                      alt="User Avatar" 
+                      className="w-8 h-8 rounded-full border-2 border-white dark:border-slate-800 shadow-sm ml-2 object-cover" 
+                    />
+                  </div>
+                </header>
+
+                <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-24 md:pb-8">
+                  <div className="max-w-6xl mx-auto">
+                    {loading ? (
+                      <div className="flex items-center justify-center h-64">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                      </div>
+                    ) : (
+                      <>
+                        {currentView === 'dashboard' && <DashboardView habits={habits} logs={logs} stats={stats} onLog={handleLogHabit} userGender={userGender} />}
+                        {currentView === 'habits' && <HabitsManager habits={habits} onRefresh={fetchData} showToast={showToast} />}
+                        {currentView === 'analytics' && <AnalyticsView habits={habits} logs={logs} stats={stats} />}
+                        {currentView === 'history' && <HistoryView logs={logs} habits={habits} />}
+                        {currentView === 'settings' && <SettingsView showToast={showToast} userGender={userGender} setUserGender={setUserGender} onRefresh={fetchData} />}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </main>
+
+              {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+            </div>
+          );
+        }
+
+        function DashboardView({ habits, logs, stats, onLog, userGender }) {
+          const today = getTodayStr();
+          
+          const todayStats = useMemo(() => {
+            let completed = 0;
+            const activeHabits = habits.length;
+            habits.forEach(h => {
+              const log = logs.find(l => l.habit_id === h.habit_id && l.date === today);
+              if (log && log.status === 'done') completed++;
+            });
+            return { completed, total: activeHabits, percent: activeHabits ? Math.round((completed/activeHabits)*100) : 0 };
+          }, [habits, logs, today]);
+
+          const bestStreak = useMemo(() => {
+            return Math.max(0, ...stats.map(s => Number(s.current_streak) || 0));
+          }, [stats]);
+
+          const last7Days = useMemo(() => {
+            const days = [];
+            const todayObj = new Date();
+            for (let i = 6; i >= 0; i--) {
+              const d = new Date(todayObj);
+              d.setDate(d.getDate() - i);
+              const dateStr = d.toISOString().split('T')[0];
+              const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+              
+              let completed = 0;
+              habits.forEach(h => {
+                const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
+                if (log && log.status === 'done') completed++;
+              });
+              days.push({ name: dayName, date: dateStr, value: habits.length ? Math.round((completed/habits.length)*100) : 0 });
+            }
+            return days;
+          }, [habits, logs]);
+
+          const bannerImg = 'https://plain-apac-prod-public.komododecks.com/202604/07/OHrBCEYHW4QxH8pSLy3e/image.png';
+
+          return (
+            <div className="space-y-6 animate-fade-in">
+              <div className="w-full h-32 md:h-56 rounded-2xl overflow-hidden relative shadow-sm bg-blue-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center">
+                <img 
+                  src={bannerImg} 
+                  alt="Dashboard Banner" 
+                  className="w-full h-full object-cover md:object-cover object-center opacity-90 hover:opacity-100 transition-opacity"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/30 to-transparent flex items-end p-4 md:p-6">
+                  <h2 className="text-white text-xl md:text-2xl font-bold drop-shadow-md">Stay Consistent Today! ✨</h2>
                 </div>
               </div>
-              <span className="text-[10px] text-slate-500 mt-1">{day.name}</span>
-            </div>
-          ))}
-        </div>
-      </div>
 
-      {/* Habits List */}
-      <div>
-        <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-          Your Habits for Today
-        </h2>
-        
-        {habits.length === 0 ? (
-          <div className="text-center py-12 bg-white dark:bg-slate-900 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 overflow-hidden relative">
-            <img src="https://images.unsplash.com/photo-1484480974693-6ca0a78fb36b?auto=format&fit=crop&w=600&q=80" alt="Empty state background" className="absolute inset-0 w-full h-full object-cover opacity-10 dark:opacity-5" />
-            <div className="relative z-10">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 dark:bg-slate-800 mb-4 shadow-sm">
-                <Plus className="w-6 h-6 text-slate-400" />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-lg shadow-blue-500/20">
+                  <h3 className="text-blue-100 text-sm font-medium mb-1">Today's Progress</h3>
+                  <div className="flex items-end gap-2 mb-4">
+                    <span className="text-4xl font-bold">{todayStats.completed}</span>
+                    <span className="text-blue-200 mb-1">/ {todayStats.total} completed</span>
+                  </div>
+                  <div className="w-full bg-blue-900/40 rounded-full h-2.5 backdrop-blur-sm overflow-hidden">
+                    <div className="bg-white h-2.5 rounded-full transition-all duration-1000 ease-out" style={{ width: `${todayStats.percent}%` }}></div>
+                  </div>
+                </div>
+                
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                    <h3 className="text-sm font-medium">Current Best Streak</h3>
+                    <Flame className="w-5 h-5 text-orange-500" />
+                  </div>
+                  <div className="text-3xl font-bold text-slate-800 dark:text-slate-100 mt-2">
+                    {bestStreak} <span className="text-lg font-normal text-slate-400">days</span>
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                    <h3 className="text-sm font-medium">Total Active Habits</h3>
+                    <Target className="w-5 h-5 text-emerald-500" />
+                  </div>
+                  <div className="text-3xl font-bold text-slate-800 dark:text-slate-100 mt-2">
+                    {habits.length}
+                  </div>
+                </div>
               </div>
-              <p className="text-slate-500 dark:text-slate-400 font-medium">No active habits. Add some from the Habits tab!</p>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {habits.map(habit => {
-              const log = logs.find(l => l.habit_id === habit.habit_id && l.date === today);
-              const isDone = log && log.status === 'done';
-              const s = stats.find(st => st.habit_id === habit.habit_id);
-              
-              return (
-                <div 
-                  key={habit.habit_id} 
-                  className={classNames(
-                    "group relative p-5 rounded-2xl border transition-all duration-300",
-                    isDone 
-                      ? "bg-emerald-50 border-emerald-200 dark:bg-emerald-900/10 dark:border-emerald-800/30" 
-                      : "bg-white border-slate-200 hover:border-blue-300 dark:bg-slate-900 dark:border-slate-800 dark:hover:border-blue-700 shadow-sm"
-                  )}
-                >
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1 block">
-                        {habit.category}
-                      </span>
-                      <h3 className={classNames("font-bold text-lg", isDone ? "text-emerald-900 dark:text-emerald-400 line-through opacity-70" : "")}>
-                        {habit.habit_name}
-                      </h3>
+
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-2xl shadow-sm">
+                <h3 className="text-sm font-bold mb-4 flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                  <Activity className="w-4 h-4 text-blue-500"/> 7-Day Trend
+                </h3>
+                <div className="h-24 flex items-end justify-between gap-2">
+                  {last7Days.map((day, i) => (
+                    <div key={i} className="flex flex-col items-center flex-1 group">
+                      <div className="w-full relative flex justify-center h-full items-end rounded-t-md">
+                        <div 
+                          className="w-full max-w-[30px] bg-blue-100 dark:bg-slate-800 rounded-t-sm transition-all relative overflow-hidden" 
+                          style={{ height: '100%' }}
+                        >
+                          <div 
+                            className="absolute bottom-0 w-full bg-blue-500 dark:bg-blue-600 rounded-t-sm transition-all duration-700 ease-out" 
+                            style={{ height: `${day.value}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-slate-500 mt-1">{day.name}</span>
                     </div>
-                    {/* Quick Complete Button */}
-                    <button 
-                      onClick={() => onLog(habit, habit.target_value, isDone ? 'missed' : 'done')}
-                      className={classNames(
-                        "flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 active:scale-90",
-                        isDone 
-                          ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/20" 
-                          : "bg-slate-100 text-slate-400 hover:bg-blue-100 hover:text-blue-600 dark:bg-slate-800 dark:hover:bg-blue-900/50"
-                      )}
-                    >
-                      <Check className="w-5 h-5" />
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
+                  Your Habits for Today
+                </h2>
+                
+                {habits.length === 0 ? (
+                  <div className="text-center py-12 bg-white dark:bg-slate-900 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 overflow-hidden relative">
+                    <img src="https://images.unsplash.com/photo-1484480974693-6ca0a78fb36b?auto=format&fit=crop&w=600&q=80" alt="Empty state background" className="absolute inset-0 w-full h-full object-cover opacity-10 dark:opacity-5" />
+                    <div className="relative z-10">
+                      <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 dark:bg-slate-800 mb-4 shadow-sm">
+                        <Plus className="w-6 h-6 text-slate-400" />
+                      </div>
+                      <p className="text-slate-500 dark:text-slate-400 font-medium">No active habits. Add some from the Habits tab!</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {habits.map(habit => {
+                      const log = logs.find(l => l.habit_id === habit.habit_id && l.date === today);
+                      const isDone = log && log.status === 'done';
+                      const s = stats.find(st => st.habit_id === habit.habit_id);
+                      
+                      return (
+                        <div 
+                          key={habit.habit_id} 
+                          className={classNames(
+                            "group relative p-5 rounded-2xl border transition-all duration-300",
+                            isDone 
+                              ? "bg-emerald-50 border-emerald-200 dark:bg-emerald-900/10 dark:border-emerald-800/30" 
+                              : "bg-white border-slate-200 hover:border-blue-300 dark:bg-slate-900 dark:border-slate-800 dark:hover:border-blue-700 shadow-sm"
+                          )}
+                        >
+                          <div className="flex justify-between items-start mb-4">
+                            <div>
+                              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1 block">
+                                {habit.category}
+                              </span>
+                              <h3 className={classNames("font-bold text-lg", isDone ? "text-emerald-900 dark:text-emerald-400 line-through opacity-70" : "")}>
+                                {habit.habit_name}
+                              </h3>
+                            </div>
+                            <button 
+                              onClick={() => onLog(habit, habit.target_value, isDone ? 'missed' : 'done')}
+                              className={classNames(
+                                "flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 active:scale-90",
+                                isDone 
+                                  ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/20" 
+                                  : "bg-slate-100 text-slate-400 hover:bg-blue-100 hover:text-blue-600 dark:bg-slate-800 dark:hover:bg-blue-900/50"
+                              )}
+                            >
+                              <Check className="w-5 h-5" />
+                            </button>
+                          </div>
+                          
+                          <div className="flex items-center gap-4 text-sm text-slate-500 dark:text-slate-400">
+                            <div className="flex items-center gap-1">
+                              <Target className="w-4 h-4" />
+                              <span>{habit.target_value} {habit.habit_type === 'duration' ? 'mins' : habit.habit_type === 'count' ? 'times' : ''}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Flame className={classNames("w-4 h-4", s?.current_streak > 0 ? "text-orange-500" : "")} />
+                              <span className={s?.current_streak > 0 ? "text-orange-600 dark:text-orange-400 font-medium" : ""}>
+                                {s?.current_streak || 0} streak
+                              </span>
+                            </div>
+                          </div>
+                          
+                          {habit.habit_type !== 'boolean' && !isDone && (
+                            <div className="mt-4 flex gap-2">
+                              <button 
+                                onClick={() => onLog(habit, (log?.value || 0) + 1, (log?.value || 0) + 1 >= habit.target_value ? 'done' : 'partial')}
+                                className="text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-1.5 rounded-lg transition-colors flex-1 font-medium"
+                              >
+                                +1 Progress ({log?.value || 0}/{habit.target_value})
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        function HabitsManager({ habits, onRefresh, showToast }) {
+          const [isEditing, setIsEditing] = useState(false);
+          const [formData, setFormData] = useState({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' });
+          const [loading, setLoading] = useState(false);
+
+          const handleSubmit = async (e) => {
+            e.preventDefault();
+            setLoading(true);
+            if (formData.habit_id) {
+              await SheetsAPI.updateHabit(formData.habit_id, formData);
+              showToast('Habit updated in Google Sheets', 'success');
+            } else {
+              await SheetsAPI.createHabit(formData);
+              showToast('New habit synced to Google Sheets', 'success');
+            }
+            setFormData({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' });
+            setIsEditing(false);
+            onRefresh();
+            setLoading(false);
+          };
+
+          const handleDelete = async (id) => {
+            if(window.confirm('Are you sure you want to delete this habit?')) {
+              await SheetsAPI.deleteHabit(id);
+              showToast('Habit archived', 'info');
+              onRefresh();
+            }
+          };
+
+          return (
+            <div className="animate-fade-in space-y-6">
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-bold">Manage Habits</h2>
+                <button 
+                  onClick={() => { setFormData({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' }); setIsEditing(!isEditing); }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 shadow-sm"
+                >
+                  {isEditing ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                  {isEditing ? 'Cancel' : 'Add Habit'}
+                </button>
+              </div>
+
+              {isEditing && (
+                <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Habit Name</label>
+                    <input required type="text" value={formData.habit_name} onChange={e => setFormData({...formData, habit_name: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="e.g., Read 10 Pages" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Category</label>
+                    <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
+                      <option value="Health">Health</option><option value="Fitness">Fitness</option><option value="Learning">Learning</option><option value="Productivity">Productivity</option><option value="Mindfulness">Mindfulness</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Type</label>
+                    <select value={formData.habit_type} onChange={e => setFormData({...formData, habit_type: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
+                      <option value="boolean">Yes / No</option><option value="count">Count (e.g., Glasses of water)</option><option value="duration">Duration (mins)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Target Value</label>
+                    <input required type="number" min="1" value={formData.target_value} onChange={e => setFormData({...formData, target_value: Number(e.target.value)})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Schedule</label>
+                    <select value={formData.schedule_type} onChange={e => setFormData({...formData, schedule_type: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
+                      <option value="daily">Daily</option><option value="weekly">Weekly</option>
+                    </select>
+                  </div>
+                  <div className="md:col-span-2 flex justify-end mt-2">
+                    <button disabled={loading} type="submit" className="bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-6 py-2 rounded-xl font-medium hover:opacity-90 transition-opacity">
+                      {loading ? 'Saving...' : 'Save to Google Sheets'}
                     </button>
                   </div>
-                  
-                  <div className="flex items-center gap-4 text-sm text-slate-500 dark:text-slate-400">
-                    <div className="flex items-center gap-1">
-                      <Target className="w-4 h-4" />
-                      <span>{habit.target_value} {habit.habit_type === 'duration' ? 'mins' : habit.habit_type === 'count' ? 'times' : ''}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Flame className={classNames("w-4 h-4", s?.current_streak > 0 ? "text-orange-500" : "")} />
-                      <span className={s?.current_streak > 0 ? "text-orange-600 dark:text-orange-400 font-medium" : ""}>
-                        {s?.current_streak || 0} streak
-                      </span>
+                </form>
+              )}
+
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm text-slate-500 dark:text-slate-400">
+                    <thead className="bg-slate-50 dark:bg-slate-800/50 text-xs uppercase text-slate-700 dark:text-slate-300">
+                      <tr>
+                        <th className="px-6 py-4 font-semibold">Habit</th>
+                        <th className="px-6 py-4 font-semibold">Category</th>
+                        <th className="px-6 py-4 font-semibold">Target</th>
+                        <th className="px-6 py-4 font-semibold text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {habits.map(habit => (
+                        <tr key={habit.habit_id} className="border-t border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                          <td className="px-6 py-4 font-medium text-slate-900 dark:text-white flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 flex items-center justify-center font-bold uppercase">
+                              {habit.habit_name.charAt(0)}
+                            </div>
+                            {habit.habit_name}
+                          </td>
+                          <td className="px-6 py-4"><span className="bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-2 py-1 rounded-md text-xs font-medium">{habit.category}</span></td>
+                          <td className="px-6 py-4">{habit.target_value} {habit.habit_type}</td>
+                          <td className="px-6 py-4 flex justify-end gap-2">
+                            <button onClick={() => { setFormData(habit); setIsEditing(true); }} className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors bg-white dark:bg-slate-900 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700"><Edit2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(habit.habit_id)} className="p-2 text-slate-400 hover:text-red-600 dark:hover:text-red-400 transition-colors bg-white dark:bg-slate-900 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700"><Trash2 className="w-4 h-4" /></button>
+                          </td>
+                        </tr>
+                      ))}
+                      {habits.length === 0 && (
+                        <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-400">No habits found. Create one to get started!</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        function AnalyticsView({ habits, logs, stats }) {
+          const last7Days = useMemo(() => {
+            const days = [];
+            const today = new Date();
+            for (let i = 6; i >= 0; i--) {
+              const d = new Date(today);
+              d.setDate(d.getDate() - i);
+              const dateStr = d.toISOString().split('T')[0];
+              const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+              
+              let completed = 0;
+              habits.forEach(h => {
+                const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
+                if (log && log.status === 'done') completed++;
+              });
+              days.push({ name: dayName, date: dateStr, value: habits.length ? Math.round((completed/habits.length)*100) : 0 });
+            }
+            return days;
+          }, [habits, logs]);
+
+          const heatmapDays = useMemo(() => {
+            const days = [];
+            const today = new Date();
+            for(let i=27; i>=0; i--) {
+              const d = new Date(today);
+              d.setDate(d.getDate() - i);
+              const dateStr = d.toISOString().split('T')[0];
+              
+              let completed = 0;
+              habits.forEach(h => {
+                const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
+                if (log && log.status === 'done') completed++;
+              });
+              const intensity = habits.length === 0 ? 0 : completed / habits.length;
+              days.push({ date: dateStr, intensity });
+            }
+            return days;
+          }, [habits, logs]);
+
+          return (
+            <div className="animate-fade-in space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart2 className="w-5 h-5 text-blue-500"/> 7-Day Completion Rate</h3>
+                  <div className="h-48 flex items-end justify-between gap-2">
+                    {last7Days.map((day, i) => (
+                      <div key={i} className="flex flex-col items-center flex-1 group">
+                        <div className="w-full relative flex justify-center h-full items-end rounded-t-md">
+                          <div 
+                            className="w-full max-w-[40px] bg-blue-500/20 group-hover:bg-blue-500/30 rounded-t-md transition-all relative overflow-hidden" 
+                            style={{ height: '100%' }}
+                          >
+                            <div 
+                              className="absolute bottom-0 w-full bg-blue-600 dark:bg-blue-500 rounded-t-md transition-all duration-700 ease-out" 
+                              style={{ height: `${day.value}%` }}
+                            ></div>
+                          </div>
+                          <span className="absolute -top-6 opacity-0 group-hover:opacity-100 text-xs font-bold text-blue-600 dark:text-blue-400 transition-opacity">
+                            {day.value}%
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-500 mt-2">{day.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Trophy className="w-5 h-5 text-amber-500"/> Most Consistent</h3>
+                  <div className="space-y-4">
+                    {[...stats].sort((a,b) => (Number(b.longest_streak) || 0) - (Number(a.longest_streak) || 0)).slice(0, 4).map((s, i) => {
+                      const h = habits.find(hb => hb.habit_id === s.habit_id);
+                      if(!h) return null;
+                      return (
+                        <div key={s.habit_id} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+                          <div className="flex items-center gap-3">
+                            <span className={`font-bold w-6 text-center ${i===0 ? 'text-amber-500' : i===1 ? 'text-slate-400' : i===2 ? 'text-amber-700' : 'text-slate-500'}`}>#{i+1}</span>
+                            <span className="font-medium">{h.habit_name}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-600 dark:text-slate-300">
+                            <Flame className="w-4 h-4 text-orange-500" /> {s.longest_streak || 0} max streak
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {habits.length === 0 && <p className="text-slate-400 text-sm text-center py-4">No data available.</p>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Calendar className="w-5 h-5 text-purple-500"/> Activity Heatmap (28 Days)</h3>
+                <div className="flex gap-2">
+                  <div className="grid grid-cols-7 gap-1.5 md:gap-2 flex-1">
+                    {heatmapDays.map((day, i) => {
+                      let bg = 'bg-slate-100 dark:bg-slate-800';
+                      if (day.intensity > 0) bg = 'bg-emerald-200 dark:bg-emerald-900/40';
+                      if (day.intensity > 0.4) bg = 'bg-emerald-300 dark:bg-emerald-700/60';
+                      if (day.intensity > 0.7) bg = 'bg-emerald-500 dark:bg-emerald-500';
+                      if (day.intensity === 1) bg = 'bg-emerald-600 dark:bg-emerald-400';
+                      
+                      return (
+                        <div 
+                          key={i} 
+                          title={`${day.date}: ${Math.round(day.intensity*100)}%`}
+                          className={classNames("w-full aspect-square rounded-sm md:rounded-md transition-colors", bg)}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="flex justify-end items-center gap-2 mt-4 text-xs text-slate-500">
+                  <span>Less</span>
+                  <div className="w-3 h-3 rounded-sm bg-slate-100 dark:bg-slate-800"></div>
+                  <div className="w-3 h-3 rounded-sm bg-emerald-300 dark:bg-emerald-700/60"></div>
+                  <div className="w-3 h-3 rounded-sm bg-emerald-600 dark:bg-emerald-400"></div>
+                  <span>More</span>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        function HistoryView({ logs, habits }) {
+          const sortedLogs = useMemo(() => {
+            return [...logs].sort((a, b) => new Date(b.date) - new Date(a.date));
+          }, [logs]);
+
+          return (
+            <div className="animate-fade-in bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+              <div className="p-6 border-b border-slate-200 dark:border-slate-800">
+                <h2 className="text-xl font-bold">Activity History</h2>
+                <p className="text-sm text-slate-500 mt-1">Raw database logs reading from Google Sheets.</p>
+              </div>
+              <div className="overflow-x-auto max-h-[60vh]">
+                <table className="w-full text-left text-sm text-slate-600 dark:text-slate-400">
+                  <thead className="bg-slate-50 dark:bg-slate-800/50 text-xs uppercase text-slate-700 dark:text-slate-300 sticky top-0 z-10 backdrop-blur-md">
+                    <tr>
+                      <th className="px-6 py-4 font-semibold">Date</th>
+                      <th className="px-6 py-4 font-semibold">Habit</th>
+                      <th className="px-6 py-4 font-semibold">Status</th>
+                      <th className="px-6 py-4 font-semibold">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                    {sortedLogs.map(log => {
+                      const h = habits.find(x => x.habit_id === log.habit_id);
+                      if(!h) return null;
+                      return (
+                        <tr key={log.log_id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
+                          <td className="px-6 py-4 whitespace-nowrap">{log.date}</td>
+                          <td className="px-6 py-4 font-medium text-slate-900 dark:text-slate-200">{h.habit_name}</td>
+                          <td className="px-6 py-4">
+                            <span className={classNames(
+                              "px-2.5 py-1 rounded-full text-xs font-semibold",
+                              log.status === 'done' ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" :
+                              log.status === 'partial' ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
+                              "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                            )}>
+                              {String(log.status).toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">{log.value} {h.habit_type === 'count' ? 'times' : h.habit_type==='duration' ? 'mins' : ''}</td>
+                        </tr>
+                      )
+                    })}
+                    {sortedLogs.length === 0 && (
+                      <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-500">No logs recorded yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        }
+
+        function SettingsView({ showToast, userGender, setUserGender, onRefresh }) {
+          const [url, setUrl] = useState(localStorage.getItem('sheets_api_url') || '');
+          const [notificationStatus, setNotificationStatus] = useState(
+            'Notification' in window ? Notification.permission : 'unsupported'
+          );
+          
+          const handleSave = async () => {
+            localStorage.setItem('sheets_api_url', url);
+            showToast('Backend Connection updated! Syncing data...', 'success');
+            if (onRefresh) onRefresh(); 
+          };
+
+          const enableNotifications = async () => {
+            if (!('Notification' in window)) {
+              showToast('This browser does not support desktop notifications.', 'warning');
+              return;
+            }
+            
+            try {
+              const permission = await Notification.requestPermission();
+              setNotificationStatus(permission);
+              if (permission === 'granted') {
+                new Notification('SyncHabit', { body: 'Notifications enabled successfully!' });
+                showToast('Notifications enabled successfully!', 'success');
+              } else {
+                showToast('Notification permission denied.', 'warning');
+              }
+            } catch (error) {
+              console.error(error);
+            }
+          };
+
+          return (
+            <div className="animate-fade-in max-w-2xl space-y-6">
+              
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-blue-600 dark:text-blue-400">
+                  <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19,3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M11,7H13V9H11V7M11,11H13V17H11V11Z" />
+                  </svg>
+                  Google Sheets Integration {url ? '🟢 (Connected)' : '🔴 (Offline Mode)'}
+                </h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
+                  Connect your custom Google Apps Script Web App URL to sync all your habits, logs, and stats directly to your personal Google Sheet.
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Apps Script Web App URL</label>
+                    <input 
+                      type="text" 
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" 
+                    />
+                  </div>
+                  <button onClick={handleSave} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-xl font-medium transition-colors">
+                    Test Connection & Save
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+                <h3 className="text-lg font-bold">Preferences</h3>
+                
+                <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <div className="font-medium text-slate-900 dark:text-white">Profile Gender</div>
+                    <div className="text-sm text-slate-500">Personalize your dashboard avatar.</div>
+                  </div>
+                  <select
+                    value={userGender}
+                    onChange={(e) => {
+                      setUserGender(e.target.value);
+                      showToast('Profile updated!', 'success');
+                    }}
+                    className="bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none text-sm font-medium"
+                  >
+                    <option value="man">Man</option>
+                    <option value="woman">Woman</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-between py-3">
+                  <div>
+                    <div className="font-medium text-slate-900 dark:text-white">Push Notifications (Desktop/Mobile)</div>
+                    <div className="text-sm text-slate-500">
+                      {notificationStatus === 'granted' ? 'System notifications are active.' : 'Receive alerts even when the browser is closed.'}
                     </div>
                   </div>
-                  
-                  {/* Progress bar visual for non-boolean types */}
-                  {habit.habit_type !== 'boolean' && !isDone && (
-                    <div className="mt-4 flex gap-2">
-                      <button 
-                        onClick={() => onLog(habit, (log?.value || 0) + 1, (log?.value || 0) + 1 >= habit.target_value ? 'done' : 'partial')}
-                        className="text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-1.5 rounded-lg transition-colors flex-1 font-medium"
-                      >
-                        +1 Progress ({log?.value || 0}/{habit.target_value})
-                      </button>
-                    </div>
+                  {notificationStatus === 'granted' ? (
+                    <span className="px-3 py-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 rounded-full text-xs font-bold">Active</span>
+                  ) : (
+                    <button 
+                      onClick={enableNotifications}
+                      className="bg-slate-900 hover:bg-slate-800 dark:bg-white dark:hover:bg-slate-200 text-white dark:text-slate-900 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors"
+                    >
+                      Enable
+                    </button>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function HabitsManager({ habits, onRefresh, showToast }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [formData, setFormData] = useState({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' });
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    if (formData.habit_id) {
-      await SheetsAPI.updateHabit(formData.habit_id, formData);
-      showToast('Habit updated in Google Sheets', 'success');
-    } else {
-      await SheetsAPI.createHabit(formData);
-      showToast('New habit synced to Google Sheets', 'success');
-    }
-    setFormData({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' });
-    setIsEditing(false);
-    onRefresh();
-    setLoading(false);
-  };
-
-  const handleDelete = async (id) => {
-    if(window.confirm('Are you sure you want to delete this habit?')) {
-      await SheetsAPI.deleteHabit(id);
-      showToast('Habit archived', 'info');
-      onRefresh();
-    }
-  };
-
-  return (
-    <div className="animate-fade-in space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-xl font-bold">Manage Habits</h2>
-        <button 
-          onClick={() => { setFormData({ habit_name: '', category: 'Health', habit_type: 'boolean', target_value: 1, schedule_type: 'daily' }); setIsEditing(!isEditing); }}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 shadow-sm"
-        >
-          {isEditing ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-          {isEditing ? 'Cancel' : 'Add Habit'}
-        </button>
-      </div>
-
-      {isEditing && (
-        <form onSubmit={handleSubmit} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Habit Name</label>
-            <input required type="text" value={formData.habit_name} onChange={e => setFormData({...formData, habit_name: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="e.g., Read 10 Pages" />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Category</label>
-            <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
-              <option value="Health">Health</option><option value="Fitness">Fitness</option><option value="Learning">Learning</option><option value="Productivity">Productivity</option><option value="Mindfulness">Mindfulness</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Type</label>
-            <select value={formData.habit_type} onChange={e => setFormData({...formData, habit_type: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
-              <option value="boolean">Yes / No</option><option value="count">Count (e.g., Glasses of water)</option><option value="duration">Duration (mins)</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Target Value</label>
-            <input required type="number" min="1" value={formData.target_value} onChange={e => setFormData({...formData, target_value: Number(e.target.value)})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none" />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Schedule</label>
-            <select value={formData.schedule_type} onChange={e => setFormData({...formData, schedule_type: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none">
-              <option value="daily">Daily</option><option value="weekly">Weekly</option>
-            </select>
-          </div>
-          <div className="md:col-span-2 flex justify-end mt-2">
-            <button disabled={loading} type="submit" className="bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-6 py-2 rounded-xl font-medium hover:opacity-90 transition-opacity">
-              {loading ? 'Saving...' : 'Save to Google Sheets'}
-            </button>
-          </div>
-        </form>
-      )}
-
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm text-slate-500 dark:text-slate-400">
-            <thead className="bg-slate-50 dark:bg-slate-800/50 text-xs uppercase text-slate-700 dark:text-slate-300">
-              <tr>
-                <th className="px-6 py-4 font-semibold">Habit</th>
-                <th className="px-6 py-4 font-semibold">Category</th>
-                <th className="px-6 py-4 font-semibold">Target</th>
-                <th className="px-6 py-4 font-semibold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {habits.map(habit => (
-                <tr key={habit.habit_id} className="border-t border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                  <td className="px-6 py-4 font-medium text-slate-900 dark:text-white flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 flex items-center justify-center font-bold uppercase">
-                      {habit.habit_name.charAt(0)}
-                    </div>
-                    {habit.habit_name}
-                  </td>
-                  <td className="px-6 py-4"><span className="bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-2 py-1 rounded-md text-xs font-medium">{habit.category}</span></td>
-                  <td className="px-6 py-4">{habit.target_value} {habit.habit_type}</td>
-                  <td className="px-6 py-4 flex justify-end gap-2">
-                    <button onClick={() => { setFormData(habit); setIsEditing(true); }} className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors bg-white dark:bg-slate-900 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700"><Edit2 className="w-4 h-4" /></button>
-                    <button onClick={() => handleDelete(habit.habit_id)} className="p-2 text-slate-400 hover:text-red-600 dark:hover:text-red-400 transition-colors bg-white dark:bg-slate-900 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700"><Trash2 className="w-4 h-4" /></button>
-                  </td>
-                </tr>
-              ))}
-              {habits.length === 0 && (
-                <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-400">No habits found. Create one to get started!</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AnalyticsView({ habits, logs, stats }) {
-  const last7Days = useMemo(() => {
-    const days = [];
-    const today = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-      
-      let completed = 0;
-      habits.forEach(h => {
-        const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
-        if (log && log.status === 'done') completed++;
-      });
-      days.push({ name: dayName, date: dateStr, value: habits.length ? Math.round((completed/habits.length)*100) : 0 });
-    }
-    return days;
-  }, [habits, logs]);
-
-  const heatmapDays = useMemo(() => {
-    const days = [];
-    const today = new Date();
-    for(let i=27; i>=0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      
-      let completed = 0;
-      habits.forEach(h => {
-        const log = logs.find(l => l.habit_id === h.habit_id && l.date === dateStr);
-        if (log && log.status === 'done') completed++;
-      });
-      const intensity = habits.length === 0 ? 0 : completed / habits.length;
-      days.push({ date: dateStr, intensity });
-    }
-    return days;
-  }, [habits, logs]);
-
-  return (
-    <div className="animate-fade-in space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Weekly Trend Chart */}
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
-          <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart2 className="w-5 h-5 text-blue-500"/> 7-Day Completion Rate</h3>
-          <div className="h-48 flex items-end justify-between gap-2">
-            {last7Days.map((day, i) => (
-              <div key={i} className="flex flex-col items-center flex-1 group">
-                <div className="w-full relative flex justify-center h-full items-end rounded-t-md">
-                  <div 
-                    className="w-full max-w-[40px] bg-blue-500/20 group-hover:bg-blue-500/30 rounded-t-md transition-all relative overflow-hidden" 
-                    style={{ height: '100%' }}
-                  >
-                    <div 
-                      className="absolute bottom-0 w-full bg-blue-600 dark:bg-blue-500 rounded-t-md transition-all duration-700 ease-out" 
-                      style={{ height: `${day.value}%` }}
-                    ></div>
-                  </div>
-                  <span className="absolute -top-6 opacity-0 group-hover:opacity-100 text-xs font-bold text-blue-600 dark:text-blue-400 transition-opacity">
-                    {day.value}%
-                  </span>
-                </div>
-                <span className="text-xs text-slate-500 mt-2">{day.name}</span>
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Top Habits Leaderboard */}
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
-          <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Trophy className="w-5 h-5 text-amber-500"/> Most Consistent</h3>
-          <div className="space-y-4">
-            {[...stats].sort((a,b) => (Number(b.longest_streak) || 0) - (Number(a.longest_streak) || 0)).slice(0, 4).map((s, i) => {
-              const h = habits.find(hb => hb.habit_id === s.habit_id);
-              if(!h) return null;
-              return (
-                <div key={s.habit_id} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
-                  <div className="flex items-center gap-3">
-                    <span className={`font-bold w-6 text-center ${i===0 ? 'text-amber-500' : i===1 ? 'text-slate-400' : i===2 ? 'text-amber-700' : 'text-slate-500'}`}>#{i+1}</span>
-                    <span className="font-medium">{h.habit_name}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-600 dark:text-slate-300">
-                    <Flame className="w-4 h-4 text-orange-500" /> {s.longest_streak || 0} max streak
-                  </div>
-                </div>
-              );
-            })}
-            {habits.length === 0 && <p className="text-slate-400 text-sm text-center py-4">No data available.</p>}
-          </div>
-        </div>
-      </div>
-
-      {/* Heatmap */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-sm">
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Calendar className="w-5 h-5 text-purple-500"/> Activity Heatmap (28 Days)</h3>
-        <div className="flex gap-2">
-          <div className="grid grid-cols-7 gap-1.5 md:gap-2 flex-1">
-            {heatmapDays.map((day, i) => {
-              let bg = 'bg-slate-100 dark:bg-slate-800';
-              if (day.intensity > 0) bg = 'bg-emerald-200 dark:bg-emerald-900/40';
-              if (day.intensity > 0.4) bg = 'bg-emerald-300 dark:bg-emerald-700/60';
-              if (day.intensity > 0.7) bg = 'bg-emerald-500 dark:bg-emerald-500';
-              if (day.intensity === 1) bg = 'bg-emerald-600 dark:bg-emerald-400';
               
-              return (
-                <div 
-                  key={i} 
-                  title={`${day.date}: ${Math.round(day.intensity*100)}%`}
-                  className={classNames("w-full aspect-square rounded-sm md:rounded-md transition-colors", bg)}
-                />
-              )
-            })}
-          </div>
-        </div>
-        <div className="flex justify-end items-center gap-2 mt-4 text-xs text-slate-500">
-          <span>Less</span>
-          <div className="w-3 h-3 rounded-sm bg-slate-100 dark:bg-slate-800"></div>
-          <div className="w-3 h-3 rounded-sm bg-emerald-300 dark:bg-emerald-700/60"></div>
-          <div className="w-3 h-3 rounded-sm bg-emerald-600 dark:bg-emerald-400"></div>
-          <span>More</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function HistoryView({ logs, habits }) {
-  const sortedLogs = useMemo(() => {
-    return [...logs].sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [logs]);
-
-  return (
-    <div className="animate-fade-in bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-      <div className="p-6 border-b border-slate-200 dark:border-slate-800">
-        <h2 className="text-xl font-bold">Activity History</h2>
-        <p className="text-sm text-slate-500 mt-1">Raw database logs reading from Google Sheets.</p>
-      </div>
-      <div className="overflow-x-auto max-h-[60vh]">
-        <table className="w-full text-left text-sm text-slate-600 dark:text-slate-400">
-          <thead className="bg-slate-50 dark:bg-slate-800/50 text-xs uppercase text-slate-700 dark:text-slate-300 sticky top-0 z-10 backdrop-blur-md">
-            <tr>
-              <th className="px-6 py-4 font-semibold">Date</th>
-              <th className="px-6 py-4 font-semibold">Habit</th>
-              <th className="px-6 py-4 font-semibold">Status</th>
-              <th className="px-6 py-4 font-semibold">Value</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-            {sortedLogs.map(log => {
-              const h = habits.find(x => x.habit_id === log.habit_id);
-              if(!h) return null;
-              return (
-                <tr key={log.log_id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                  <td className="px-6 py-4 whitespace-nowrap">{log.date}</td>
-                  <td className="px-6 py-4 font-medium text-slate-900 dark:text-slate-200">{h.habit_name}</td>
-                  <td className="px-6 py-4">
-                    <span className={classNames(
-                      "px-2.5 py-1 rounded-full text-xs font-semibold",
-                      log.status === 'done' ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" :
-                      log.status === 'partial' ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
-                      "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                    )}>
-                      {String(log.status).toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">{log.value} {h.habit_type === 'count' ? 'times' : h.habit_type==='duration' ? 'mins' : ''}</td>
-                </tr>
-              )
-            })}
-            {sortedLogs.length === 0 && (
-              <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-500">No logs recorded yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function SettingsView({ showToast, userGender, setUserGender, onRefresh }) {
-  const [url, setUrl] = useState(localStorage.getItem('sheets_api_url') || '');
-  const [notificationStatus, setNotificationStatus] = useState(
-    'Notification' in window ? Notification.permission : 'unsupported'
-  );
-  
-  const handleSave = async () => {
-    localStorage.setItem('sheets_api_url', url);
-    showToast('Backend Connection updated! Syncing data...', 'success');
-    if (onRefresh) onRefresh(); 
-  };
-
-  const enableNotifications = async () => {
-    if (!('Notification' in window)) {
-      showToast('This browser does not support desktop notifications.', 'warning');
-      return;
-    }
-    
-    try {
-      const permission = await Notification.requestPermission();
-      setNotificationStatus(permission);
-      if (permission === 'granted') {
-        new Notification('SyncHabit', { body: 'Notifications enabled successfully!' });
-        showToast('Notifications enabled successfully!', 'success');
-      } else {
-        showToast('Notification permission denied.', 'warning');
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  return (
-    <div className="animate-fade-in max-w-2xl space-y-6">
-      
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-blue-600 dark:text-blue-400">
-          <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M19,3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M11,7H13V9H11V7M11,11H13V17H11V11Z" />
-          </svg>
-          Google Sheets Integration {url ? '🟢 (Connected)' : '🔴 (Offline Mode)'}
-        </h3>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-          Connect your custom Google Apps Script Web App URL to sync all your habits, logs, and stats directly to your personal Google Sheet.
-        </p>
-        
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Apps Script Web App URL</label>
-            <input 
-              type="text" 
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" 
-            />
-          </div>
-          <button onClick={handleSave} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-xl font-medium transition-colors">
-            Test Connection & Save
-          </button>
-        </div>
-        
-        <div className="mt-6 bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 flex gap-3 text-sm text-blue-800 dark:text-blue-300 border border-blue-100 dark:border-blue-900/50">
-          <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
-          <div>
-            <strong className="block mb-1">Architecture Note:</strong>
-            This live preview relies on a robust Service Layer abstraction. Currently, it utilizes localStorage to demonstrate immediate read/write functionality in this sandboxed environment. In a production environment, you deploy an Apps Script `doGet`/`doPost` that interacts with `SpreadsheetApp` and wire it to this UI.
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-        <h3 className="text-lg font-bold">Preferences</h3>
-        
-        <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-800">
-          <div>
-            <div className="font-medium text-slate-900 dark:text-white">Profile Gender</div>
-            <div className="text-sm text-slate-500">Personalize your dashboard avatar.</div>
-          </div>
-          <select
-            value={userGender}
-            onChange={(e) => {
-              setUserGender(e.target.value);
-              showToast('Profile updated!', 'success');
-            }}
-            className="bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 outline-none text-sm font-medium"
-          >
-            <option value="man">Man</option>
-            <option value="woman">Woman</option>
-          </select>
-        </div>
-
-        <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-800">
-          <div>
-            <div className="font-medium text-slate-900 dark:text-white">Smart Animations</div>
-            <div className="text-sm text-slate-500">Enable UI transitions and micro-interactions.</div>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" className="sr-only peer" defaultChecked />
-            <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-slate-600 peer-checked:bg-blue-600"></div>
-          </label>
-        </div>
-
-        <div className="flex items-center justify-between py-3">
-          <div>
-            <div className="font-medium text-slate-900 dark:text-white">Push Notifications (Desktop/Mobile)</div>
-            <div className="text-sm text-slate-500">
-              {notificationStatus === 'granted' ? 'System notifications are active.' : 'Receive alerts even when the browser is closed.'}
             </div>
-          </div>
-          {notificationStatus === 'granted' ? (
-            <span className="px-3 py-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 rounded-full text-xs font-bold">Active</span>
-          ) : (
-            <button 
-              onClick={enableNotifications}
-              className="bg-slate-900 hover:bg-slate-800 dark:bg-white dark:hover:bg-slate-200 text-white dark:text-slate-900 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors"
-            >
-              Enable
-            </button>
-          )}
-        </div>
-      </div>
-      
-    </div>
-  );
-}
+          );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
